@@ -31,19 +31,19 @@ python3 musicrename.py [参数] [目录]
 ```bash
 python3 musicrename.py /path/to/music
 python3 musicrename.py --debug /path/to/music
-python3 musicrename.py n /path/to/music
+python3 musicrename.py -n /path/to/music
 ```
 
 如果不传目录，脚本会使用代码里的默认路径。
 
 ## 参数说明
 
-`--debug` / `-d` / `debug`
+`--debug` / `-d`
 
 - 打开调试输出
 - 会打印目录扫描、文件重命名、封面补充、目录重命名等过程日志
 
-`n`
+`--no-process-album` / `-n`
 
 - 不裁剪专辑名里最后一个 `-` 后面的内容
 - 默认行为下，如果专辑名里包含 `-`，脚本会只保留最后一个 `-` 前面的部分

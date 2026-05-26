@@ -1,3 +1,4 @@
+import argparse
 import os
 import re
 import sys
@@ -119,8 +120,8 @@ def _rename_item_if_needed(old_path: str, new_path: str):
         debug_print(f"文件名未变化，跳过: {old_path}")
         return
     if os.path.exists(new_path):
-        # 不覆盖已有文件，直接跳过
-        debug_print(f"目标文件已存在，跳过重命名: {new_path}")
+        # 不覆盖已有文件，但默认提示用户，避免静默漏处理。
+        print(f"警告：目标文件已存在，跳过重命名: {old_path} -> {new_path}")
         return
     debug_print(f"重命名文件: {old_path} -> {new_path}")
     os.rename(old_path, new_path)
@@ -524,7 +525,7 @@ def _resolve_rename_dst(src_dir: str, dst_dir: str) -> Optional[str]:
     if not os.path.exists(dst_abs):
         return dst_abs
 
-    debug_print(f"目标目录已存在，跳过重命名: {dst_dir}")
+    print(f"警告：目标目录已存在，跳过重命名: {src_dir} -> {dst_dir}")
     return None
 
 
@@ -620,18 +621,22 @@ def dispose_files(file_path: str, src_path: str):
 
 def _parse_args(argv: list[str]) -> str:
     global DEBUG, not_process_album
-    filepath = r"F:\自用"
-    path_args = []
-    for arg in argv[1:]:
-        if arg in {"--debug", "-d", "debug"}:
-            DEBUG = True
-        elif arg == "n":
-            not_process_album = True
-        else:
-            path_args.append(arg)
+    parser = argparse.ArgumentParser(description="整理音乐目录并重命名专辑文件夹")
+    parser.add_argument("path", nargs="?", default=r"F:\自用", help="要处理的音乐根目录")
+    parser.add_argument("-d", "--debug", action="store_true", help="输出调试日志")
+    parser.add_argument(
+        "-n",
+        "--no-process-album",
+        action="store_true",
+        help="不裁剪专辑名里最后一个 - 后面的内容",
+    )
+    parsed = parser.parse_args(argv[1:])
+
+    DEBUG = parsed.debug
+    not_process_album = parsed.no_process_album
+    filepath = parsed.path
+
     debug_print(f"参数解析结果: filepath={filepath}, not_process_album={not_process_album}")
-    if path_args:
-        filepath = path_args[0]
     debug_print(f"最终处理路径: {filepath}")
     return filepath
 
@@ -639,6 +644,8 @@ def _parse_args(argv: list[str]) -> str:
 def main(argv: Optional[list[str]] = None):
     args = argv or sys.argv
     filepath = _parse_args(args)
+    if not os.path.isdir(filepath):
+        raise FileNotFoundError(f"目录不存在或不可访问：{filepath}")
     audio_dirs = _collect_audio_dirs(filepath)
     debug_print(f"共发现 {len(audio_dirs)} 个待处理目录")
     for path in audio_dirs:
