@@ -59,6 +59,7 @@ python3 musicrename.py [参数] [目录]
 python3 musicrename.py /path/to/music
 python3 musicrename.py --debug /path/to/music
 python3 musicrename.py -n /path/to/music
+python3 musicrename.py --converter zhconvert /path/to/music
 ```
 
 如果不传目录，脚本会使用代码里的默认路径。
@@ -74,6 +75,21 @@ python3 musicrename.py -n /path/to/music
 
 - 不裁剪专辑名里最后一个 `-` 后面的内容
 - 默认行为下，如果专辑名里包含 `-`，脚本会只保留最后一个 `-` 前面的部分
+
+`--converter` / `-c`
+
+- 选择简繁转换后端，可选 `opencc`（默认）或 `zhconvert`
+- `opencc`：本地转换，快、离线、确定性，适合批量处理整库
+- `zhconvert`：调用繁化姬 API（<https://zhconvert.org>），转换质量更高，但每个待转字符串都要一次网络请求，速度慢很多且依赖联网
+- 走 `zhconvert` 时，脚本会强制 `modules={"*":0}`，只做字符级简繁转换，不启用错别字修正、专有名词等模块，保证标签内容可预测
+- API 多次失败会自动回退到本地 `opencc`，所以使用此选项时本地仍需装好 `opencc`
+- 转换结果带进程内缓存（相同字符串只请求一次）
+
+`--zh-interval`
+
+- 仅在 `--converter zhconvert` 时生效
+- 设置两次 API 请求之间的最小间隔秒数，用于限速、避免触发繁化姬的频率限制
+- 默认 `0`（不限速）；批量处理大量文件时建议设一个小值，例如 `--zh-interval 0.2`
 
 `[目录]`
 

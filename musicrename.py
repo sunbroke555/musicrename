@@ -1,8 +1,12 @@
 import argparse
+import json
 import os
 import re
 import sys
 import threading
+import time
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from functools import lru_cache
@@ -47,6 +51,13 @@ MP4 = mutagen_mp4.MP4
 
 not_process_album = False
 DEBUG = False
+# 简繁转换后端："opencc"（本地，默认）或 "zhconvert"（繁化姬 API）。
+CONVERTER_BACKEND = "opencc"
+# zhconvert 相关配置
+ZHCONVERT_API = "https://api.zhconvert.org/convert"
+ZHCONVERT_TIMEOUT = 10.0          # 单次请求超时（秒）
+ZHCONVERT_RETRIES = 2             # 网络失败重试次数（之后回退本地 opencc）
+ZHCONVERT_MIN_INTERVAL = 0.0      # 两次请求之间的最小间隔（秒），用于限速，0 表示不限
 AUDIO_EXTS = {".m4a", ".flac", ".mp3"}
 RENAMABLE_EXTS = AUDIO_EXTS | {".aac", ".alac", ".wav", ".jpg", ".jpeg", ".png", ".cue", ".log"}
 COVER_EXTS = {".jpg", ".jpeg", ".png"}
@@ -95,8 +106,64 @@ def _get_thread_t2s_converter():
     return _T2S_LOCAL.conv
 
 
+_ZH_RATE_LOCK = threading.Lock()
+_zh_last_call = [0.0]
+
+
+def _zh_rate_limit():
+    if ZHCONVERT_MIN_INTERVAL <= 0:
+        return
+    with _ZH_RATE_LOCK:
+        wait = ZHCONVERT_MIN_INTERVAL - (time.monotonic() - _zh_last_call[0])
+        if wait > 0:
+            time.sleep(wait)
+        _zh_last_call[0] = time.monotonic()
+
+
+def _zhconvert_t2s(text: str) -> str:
+    """
+    Traditional -> Simplified via the zhconvert (繁化姬) API.
+    Disables all modules ({"*":0}) so only character conversion happens,
+    keeping behavior predictable for tag/filename values.
+    Raises on network/API failure (caller decides whether to fall back).
+    """
+    body = urllib.parse.urlencode({
+        "converter": "Simplified",
+        "text": text,
+        "modules": '{"*":0}',
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        ZHCONVERT_API,
+        data=body,
+        headers={
+            "User-Agent": "musicrename",
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+    )
+    _zh_rate_limit()
+    with urllib.request.urlopen(req, timeout=ZHCONVERT_TIMEOUT) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    if payload.get("code") != 0:
+        raise RuntimeError(f"zhconvert API 返回错误: code={payload.get('code')} msg={payload.get('msg')}")
+    return payload["data"]["text"]
+
+
+def _zhconvert_t2s_with_fallback(text: str) -> str:
+    last_err = None
+    for attempt in range(ZHCONVERT_RETRIES + 1):
+        try:
+            return _zhconvert_t2s(text)
+        except Exception as e:
+            last_err = e
+            debug_print(f"zhconvert 第 {attempt + 1} 次失败: {e}")
+    debug_print(f"zhconvert 多次失败，回退本地 opencc: {last_err}")
+    return _get_thread_t2s_converter().convert(text)
+
+
 @lru_cache(maxsize=8192)
 def _to_simplified_cached(text: str) -> str:
+    if CONVERTER_BACKEND == "zhconvert":
+        return _zhconvert_t2s_with_fallback(text)
     return _get_thread_t2s_converter().convert(text)
 
 
@@ -652,7 +719,7 @@ def dispose_files(file_path: str, src_path: str):
 
 
 def _parse_args(argv: list[str]) -> str:
-    global DEBUG, not_process_album
+    global DEBUG, not_process_album, CONVERTER_BACKEND, ZHCONVERT_MIN_INTERVAL
     parser = argparse.ArgumentParser(description="整理音乐目录并重命名专辑文件夹")
     parser.add_argument("path", nargs="?", default=r"F:\自用", help="要处理的音乐根目录")
     parser.add_argument("-d", "--debug", action="store_true", help="输出调试日志")
@@ -662,13 +729,29 @@ def _parse_args(argv: list[str]) -> str:
         action="store_true",
         help="不裁剪专辑名里最后一个 - 后面的内容",
     )
+    parser.add_argument(
+        "-c",
+        "--converter",
+        choices=("opencc", "zhconvert"),
+        default="opencc",
+        help="简繁转换后端：opencc（本地，默认，快/离线）或 zhconvert（繁化姬 API，质量更高但需联网）",
+    )
+    parser.add_argument(
+        "--zh-interval",
+        type=float,
+        default=0.0,
+        help="使用 zhconvert 时两次 API 请求的最小间隔秒数（限速，默认 0 不限）",
+    )
     parsed = parser.parse_args(argv[1:])
 
     DEBUG = parsed.debug
     not_process_album = parsed.no_process_album
+    CONVERTER_BACKEND = parsed.converter
+    ZHCONVERT_MIN_INTERVAL = parsed.zh_interval
     filepath = parsed.path
 
-    debug_print(f"参数解析结果: filepath={filepath}, not_process_album={not_process_album}")
+    debug_print(f"参数解析结果: filepath={filepath}, not_process_album={not_process_album}, "
+                f"converter={CONVERTER_BACKEND}, zh_interval={ZHCONVERT_MIN_INTERVAL}")
     debug_print(f"最终处理路径: {filepath}")
     return filepath
 
