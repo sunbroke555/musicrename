@@ -15,10 +15,37 @@
 Python 包：
 
 ```bash
-python3 -m pip install mutagen pymediainfo opencc-python-reimplemented
+python3 -m pip install mutagen pymediainfo opencc
 ```
 
 系统还需要安装 MediaInfo，本脚本通过 `pymediainfo` 读取音频信息。
+
+### 从旧版本迁移（opencc-python-reimplemented → opencc）
+
+本脚本的简繁转换已从纯 Python 的 `opencc-python-reimplemented` 切换到官方的 `opencc`（C++ 内核，更快，零 Python 依赖）。
+
+两个包的导入名都是 `opencc`，不能同时安装，否则会互相覆盖导致行为不确定。升级时务必先卸载旧的，再装新的：
+
+```bash
+# 1. 卸载旧的纯 Python 实现
+python3 -m pip uninstall -y opencc-python-reimplemented
+
+# 2. 安装官方 opencc
+python3 -m pip install opencc
+```
+
+验证安装是否成功：
+
+```bash
+python3 -c "import opencc; print(opencc.OpenCC('t2s').convert('漢字測試'))"
+# 预期输出：汉字测试
+```
+
+说明：
+
+- 如果你用的是虚拟环境（venv/conda），请在对应环境里执行上面的命令。
+- 官方 `opencc` 在 macOS（Intel/Apple Silicon）、Linux、Windows 的常见 Python 版本上都有预编译 wheel，`pip install opencc` 一般直接装二进制，无需编译。
+- 仅当你的平台/Python 版本没有匹配 wheel 时，pip 才会回退到源码构建，此时需要 C++ 编译器（g++ 4.6+ / clang 3.2+）和 CMake。
 
 ## 用法
 
@@ -83,4 +110,4 @@ python3 musicrename.py -n /path/to/music
 
 - `mutagen`
 - `pymediainfo`
-- `opencc-python-reimplemented`
+- `opencc`

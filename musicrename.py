@@ -10,7 +10,7 @@ from importlib import import_module
 from typing import Optional
 
 THIRD_PARTY_DEPENDENCIES = {
-    "opencc": "python -m pip install opencc-python-reimplemented",
+    "opencc": "python -m pip install opencc",
     "mutagen": "python -m pip install mutagen",
     "pymediainfo": "python -m pip install pymediainfo",
 }
@@ -75,7 +75,7 @@ def debug_print(*args, **kwargs):
 def _get_t2s_converter():
     """
     Traditional Chinese -> Simplified Chinese converter (OpenCC).
-    Uses the pure Python implementation: pip install opencc-python-reimplemented
+    Uses the official OpenCC package: pip install opencc
     """
     opencc = _require_module("opencc")
     for config in ("t2s", "t2s.json"):
@@ -319,12 +319,12 @@ def _convert_mp4_tag_value(value):
     return value, False
 
 
-def convert_embedded_tags(filename: str) -> bool:
+def _convert_tags_on_audio(audio) -> bool:
     """
-    Convert all embedded text tags (including lyrics) Traditional->Simplified.
-    Returns True if any tag was modified.
+    Convert all embedded text tags (including lyrics) Traditional->Simplified
+    on an already-open audio object, WITHOUT saving.
+    Returns True if any tag was modified (caller is responsible for saving).
     """
-    audio = File(filename)
     if audio is None:
         return False
 
@@ -341,8 +341,6 @@ def convert_embedded_tags(filename: str) -> bool:
             if ch:
                 audio[k] = nv
                 changed = True
-        if changed:
-            audio.save()
         return changed
 
     if isinstance(audio, MP3):
@@ -363,8 +361,6 @@ def convert_embedded_tags(filename: str) -> bool:
                 if local_changed:
                     frame.text = new_text
                     changed = True
-        if changed:
-            audio.save()
         return changed
 
     if isinstance(audio, FLAC):
@@ -378,8 +374,6 @@ def convert_embedded_tags(filename: str) -> bool:
                 if local_changed:
                     audio.tags[k] = new_vals
                     changed = True
-        if changed:
-            audio.save()
         return changed
 
     # Other formats: best-effort; if tags exist and are str/list[str], convert.
@@ -400,8 +394,19 @@ def convert_embedded_tags(filename: str) -> bool:
                 if local_changed:
                     tags[k] = new_list
                     changed = True
-        if changed:
-            audio.save()
+    return changed
+
+
+def convert_embedded_tags(filename: str) -> bool:
+    """
+    Convert all embedded text tags (including lyrics) Traditional->Simplified.
+    Opens the file, converts, and saves if anything changed.
+    Returns True if any tag was modified.
+    """
+    audio = File(filename)
+    changed = _convert_tags_on_audio(audio)
+    if changed:
+        audio.save()
     return changed
 
 
@@ -530,17 +535,23 @@ def _resolve_rename_dst(src_dir: str, dst_dir: str) -> Optional[str]:
 
 
 def insert_cover(filename: str, cover: Optional[CoverAsset], album_performer: Optional[str]):
+    # 只打开一次文件：先在内存里完成繁转简、补封面、补专辑艺人，最后只 save() 一次。
     audio = File(filename)
+
     if isinstance(audio, MP4):
-        # 先转换所有内嵌文本标签（含歌词）。成功时这里不会重复保存：convert_embedded_tags()
-        # 只有当确实有文本变更才会 save()。
-        changed = convert_embedded_tags(filename)
-        audio = File(filename)
-        if cover and "covr" not in audio:
-            debug_print(f"正在处理 {filename} 缺少的封面")
-            audio["covr"] = [MP4Cover(cover.data, imageformat=cover.mp4_format)]
-            debug_print(f"{filename} 封面补充完成")
-            changed = True
+        # 先转换所有内嵌文本标签（含歌词），不在此处保存。
+        changed = _convert_tags_on_audio(audio)
+        if cover:
+            existing = audio.get("covr")
+            if not existing:
+                debug_print(f"正在处理 {filename} 缺少的封面")
+                audio["covr"] = [MP4Cover(cover.data, imageformat=cover.mp4_format)]
+                debug_print(f"{filename} 封面补充完成")
+                changed = True
+            elif len(cover.data) > len(bytes(existing[0])):
+                debug_print(f"外置封面更大，替换 {filename} 内嵌封面")
+                audio["covr"] = [MP4Cover(cover.data, imageformat=cover.mp4_format)]
+                changed = True
 
         if album_performer and "aART" not in audio:
             audio['aART'] = album_performer
@@ -549,15 +560,23 @@ def insert_cover(filename: str, cover: Optional[CoverAsset], album_performer: Op
             audio.save()
 
     elif isinstance(audio, MP3):
-        changed = convert_embedded_tags(filename)
-        audio = MP3(filename)
+        changed = _convert_tags_on_audio(audio)
         if audio.tags is None:
             audio.add_tags()
-        if cover and not audio.tags.getall("APIC"):
-            debug_print(f"正在处理 {filename} 缺少的封面")
-            audio.tags.add(APIC(encoding=3, mime=cover.mime, type=3, desc="Cover", data=cover.data))
-            debug_print(f"{filename} 封面补充完成")
-            changed = True
+        if cover:
+            apics = audio.tags.getall("APIC")
+            if not apics:
+                debug_print(f"正在处理 {filename} 缺少的封面")
+                audio.tags.add(APIC(encoding=3, mime=cover.mime, type=3, desc="Cover", data=cover.data))
+                debug_print(f"{filename} 封面补充完成")
+                changed = True
+            else:
+                front = next((p for p in apics if getattr(p, "type", None) == 3), apics[0])
+                if len(cover.data) > len(front.data):
+                    debug_print(f"外置封面更大，替换 {filename} 内嵌封面")
+                    audio.tags.delall("APIC")
+                    audio.tags.add(APIC(encoding=3, mime=cover.mime, type=3, desc="Cover", data=cover.data))
+                    changed = True
 
         if album_performer and not audio.tags.getall("TPE2"):
             audio.tags.add(TPE2(encoding=3, text=[album_performer]))
@@ -566,18 +585,31 @@ def insert_cover(filename: str, cover: Optional[CoverAsset], album_performer: Op
             audio.save()
 
     elif isinstance(audio, FLAC):
-        # 先转换所有内嵌文本标签（含歌词）
-        changed = convert_embedded_tags(filename)
-        audio = File(filename)
-        if cover and not any(p.type == 3 for p in audio.pictures):
-            debug_print(f"正在处理 {filename} 缺少的封面")
-            picture = Picture()
-            picture.data = cover.data
-            picture.type = 3
-            picture.mime = cover.mime
-            audio.add_picture(picture)
-            debug_print(f"{filename} 封面补充完成")
-            changed = True
+        # 先转换所有内嵌文本标签（含歌词），不在此处保存。
+        changed = _convert_tags_on_audio(audio)
+        if cover:
+            fronts = [p for p in audio.pictures if p.type == 3]
+            if not fronts:
+                debug_print(f"正在处理 {filename} 缺少的封面")
+                picture = Picture()
+                picture.data = cover.data
+                picture.type = 3
+                picture.mime = cover.mime
+                audio.add_picture(picture)
+                debug_print(f"{filename} 封面补充完成")
+                changed = True
+            elif len(cover.data) > len(fronts[0].data):
+                debug_print(f"外置封面更大，替换 {filename} 内嵌封面")
+                others = [p for p in audio.pictures if p.type != 3]
+                audio.clear_pictures()
+                for p in others:
+                    audio.add_picture(p)
+                picture = Picture()
+                picture.data = cover.data
+                picture.type = 3
+                picture.mime = cover.mime
+                audio.add_picture(picture)
+                changed = True
 
         if album_performer and "albumartist" not in audio:
             audio["albumartist"] = album_performer
